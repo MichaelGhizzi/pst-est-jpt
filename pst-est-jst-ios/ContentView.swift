@@ -255,7 +255,7 @@ class CityEventsManager: ObservableObject {
 
     private func normalizedCityForTicketmaster(_ city: String) -> String {
         switch city.lowercased() {
-        case "orange":
+        case "orange county":
             return "Anaheim"
         default:
             return city
@@ -568,144 +568,266 @@ struct CityDetailView: View {
     }
 }
 
+// MARK: - City Model & Persistent Store
+
+struct City: Identifiable, Codable, Equatable {
+    var id: UUID
+    var city: String
+    var countryCode: String
+    var latitude: Double
+    var longitude: Double
+    var timeZoneID: String
+
+    init(id: UUID = UUID(), city: String, countryCode: String, latitude: Double, longitude: Double, timeZoneID: String) {
+        self.id = id
+        self.city = city
+        self.countryCode = countryCode
+        self.latitude = latitude
+        self.longitude = longitude
+        self.timeZoneID = timeZoneID
+    }
+}
+
+@MainActor
+class CityStore: ObservableObject {
+    @Published var cities: [City] {
+        didSet { save() }
+    }
+
+    private let storageKey = "worldClock.savedCities.v1"
+
+    init() {
+        if let data = UserDefaults.standard.data(forKey: storageKey),
+           let decoded = try? JSONDecoder().decode([City].self, from: data) {
+            cities = decoded
+        } else {
+            cities = Self.defaultCities
+        }
+    }
+
+    func addCity(_ city: City) {
+        cities.append(city)
+    }
+
+    func removeCities(at offsets: IndexSet) {
+        cities.remove(atOffsets: offsets)
+    }
+
+    func moveCities(from source: IndexSet, to destination: Int) {
+        cities.move(fromOffsets: source, toOffset: destination)
+    }
+
+    private func save() {
+        guard let data = try? JSONEncoder().encode(cities) else { return }
+        UserDefaults.standard.set(data, forKey: storageKey)
+    }
+
+    static let defaultCities: [City] = [
+        City(city: "Los Angeles", countryCode: "US", latitude: 34.0522, longitude: -118.2437, timeZoneID: "America/Los_Angeles"),
+        City(city: "Orange County", countryCode: "US", latitude: 33.7174, longitude: -117.8311, timeZoneID: "America/Los_Angeles"),
+        City(city: "New York", countryCode: "US", latitude: 40.7128, longitude: -74.0060, timeZoneID: "America/New_York"),
+        City(city: "Tokyo", countryCode: "JP", latitude: 35.6762, longitude: 139.6503, timeZoneID: "Asia/Tokyo"),
+        City(city: "Kyoto", countryCode: "JP", latitude: 35.0116, longitude: 135.7681, timeZoneID: "Asia/Tokyo"),
+        City(city: "Osaka", countryCode: "JP", latitude: 34.6937, longitude: 135.5023, timeZoneID: "Asia/Tokyo"),
+        City(city: "Fukuoka", countryCode: "JP", latitude: 33.5902, longitude: 130.4017, timeZoneID: "Asia/Tokyo"),
+        City(city: "Oita", countryCode: "JP", latitude: 33.2396, longitude: 131.6093, timeZoneID: "Asia/Tokyo"),
+        City(city: "Beppu", countryCode: "JP", latitude: 33.2847, longitude: 131.4911, timeZoneID: "Asia/Tokyo"),
+        City(city: "Hiroshima", countryCode: "JP", latitude: 34.3853, longitude: 132.4553, timeZoneID: "Asia/Tokyo"),
+        City(city: "Sapporo", countryCode: "JP", latitude: 43.0618, longitude: 141.3545, timeZoneID: "Asia/Tokyo"),
+        City(city: "Otaru", countryCode: "JP", latitude: 43.1888, longitude: 140.9876, timeZoneID: "Asia/Tokyo")
+    ]
+}
+
+// MARK: - City Search (Add City)
+
+struct GeocodingResponse: Codable {
+    let results: [GeocodingResult]?
+}
+
+struct GeocodingResult: Codable, Identifiable {
+    let id: Int
+    let name: String
+    let latitude: Double
+    let longitude: Double
+    let country_code: String?
+    let admin1: String?
+    let timezone: String?
+
+    var displayName: String {
+        if let admin1, !admin1.isEmpty, admin1 != name {
+            return "\(name), \(admin1)"
+        }
+        return name
+    }
+}
+
+@MainActor
+class CitySearchService: ObservableObject {
+    @Published var results: [GeocodingResult] = []
+    @Published var isSearching = false
+    @Published var errorMessage: String?
+
+    func search(query: String) async {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            results = []
+            errorMessage = nil
+            return
+        }
+
+        isSearching = true
+        errorMessage = nil
+        defer { isSearching = false }
+
+        guard var components = URLComponents(string: "https://geocoding-api.open-meteo.com/v1/search") else { return }
+        components.queryItems = [
+            URLQueryItem(name: "name", value: trimmed),
+            URLQueryItem(name: "count", value: "10"),
+            URLQueryItem(name: "language", value: "en"),
+            URLQueryItem(name: "format", value: "json")
+        ]
+
+        guard let url = components.url else { return }
+
+        do {
+            let (data, _) = try await URLSession.shared.data(from: url)
+            let decoded = try JSONDecoder().decode(GeocodingResponse.self, from: data)
+
+            guard trimmed == query.trimmingCharacters(in: .whitespacesAndNewlines) else { return }
+
+            results = decoded.results ?? []
+            if results.isEmpty {
+                errorMessage = "No cities found for \"\(trimmed)\"."
+            }
+        } catch {
+            errorMessage = "Search failed: \(error.localizedDescription)"
+            results = []
+        }
+    }
+}
+
+struct AddCityView: View {
+    @ObservedObject var store: CityStore
+    @Environment(\.dismiss) private var dismiss
+
+    @StateObject private var search = CitySearchService()
+    @State private var query = ""
+    @State private var searchTask: Task<Void, Never>?
+
+    var body: some View {
+        NavigationStack {
+            List {
+                if search.isSearching {
+                    HStack {
+                        Spacer()
+                        ProgressView()
+                        Spacer()
+                    }
+                } else if let message = search.errorMessage {
+                    Text(message)
+                        .foregroundStyle(.secondary)
+                } else if query.isEmpty {
+                    Text("Search for a city to add it to your list.")
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(search.results) { result in
+                        Button {
+                            addCity(from: result)
+                        } label: {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(result.displayName)
+                                    .font(.headline)
+                                    .foregroundStyle(.primary)
+
+                                Text(result.country_code ?? "")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                }
+            }
+            .searchable(text: $query, prompt: "Search for a city")
+            .onChange(of: query) { newValue in
+                searchTask?.cancel()
+                searchTask = Task {
+                    try? await Task.sleep(nanoseconds: 350_000_000)
+                    guard !Task.isCancelled else { return }
+                    await search.search(query: newValue)
+                }
+            }
+            .navigationTitle("Add City")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Cancel") { dismiss() }
+                }
+            }
+        }
+    }
+
+    private func addCity(from result: GeocodingResult) {
+        let newCity = City(
+            city: result.name,
+            countryCode: result.country_code ?? "US",
+            latitude: result.latitude,
+            longitude: result.longitude,
+            timeZoneID: result.timezone ?? TimeZone.current.identifier
+        )
+        store.addCity(newCity)
+        dismiss()
+    }
+}
+
 // MARK: - Main View
 
 struct ContentView: View {
+    @StateObject private var store = CityStore()
     @State private var now = Date()
+    @State private var showingAddCity = false
     let timer = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
 
     var body: some View {
-        ZStack {
-            LinearGradient(
-                colors: [Color.blue.opacity(0.08), Color.white.opacity(0.10)],
-                startPoint: .top,
-                endPoint: .bottom
-            )
-            .ignoresSafeArea()
-
-            ScrollView {
-                VStack(spacing: 10) {
-                    TimeZoneCard(
-                        abbreviation: "PST",
-                        city: "Los Angeles",
-                        countryCode: "US",
-                        latitude: 34.0522,
-                        longitude: -118.2437,
-                        timeZoneID: "America/Los_Angeles",
-                        now: now
-                    )
-
-                    TimeZoneCard(
-                        abbreviation: "PST",
-                        city: "Orange",
-                        countryCode: "US",
-                        latitude: 33.7174,
-                        longitude: -117.8311,
-                        timeZoneID: "America/Los_Angeles",
-                        now: now
-                    )
-
-                    TimeZoneCard(
-                        abbreviation: "EST",
-                        city: "New York",
-                        countryCode: "US",
-                        latitude: 40.7128,
-                        longitude: -74.0060,
-                        timeZoneID: "America/New_York",
-                        now: now
-                    )
-
-                    TimeZoneCard(
-                        abbreviation: "JST",
-                        city: "Tokyo",
-                        countryCode: "JP",
-                        latitude: 35.6762,
-                        longitude: 139.6503,
-                        timeZoneID: "Asia/Tokyo",
-                        now: now
-                    )
-
-                    TimeZoneCard(
-                        abbreviation: "JST",
-                        city: "Kyoto",
-                        countryCode: "JP",
-                        latitude: 35.0116,
-                        longitude: 135.7681,
-                        timeZoneID: "Asia/Tokyo",
-                        now: now
-                    )
-
-                    TimeZoneCard(
-                        abbreviation: "JST",
-                        city: "Osaka",
-                        countryCode: "JP",
-                        latitude: 34.6937,
-                        longitude: 135.5023,
-                        timeZoneID: "Asia/Tokyo",
-                        now: now
-                    )
-
-                    TimeZoneCard(
-                        abbreviation: "JST",
-                        city: "Fukuoka",
-                        countryCode: "JP",
-                        latitude: 33.5902,
-                        longitude: 130.4017,
-                        timeZoneID: "Asia/Tokyo",
-                        now: now
-                    )
-
-                    TimeZoneCard(
-                        abbreviation: "JST",
-                        city: "Oita",
-                        countryCode: "JP",
-                        latitude: 33.2396,
-                        longitude: 131.6093,
-                        timeZoneID: "Asia/Tokyo",
-                        now: now
-                    )
-
-                    TimeZoneCard(
-                        abbreviation: "JST",
-                        city: "Beppu",
-                        countryCode: "JP",
-                        latitude: 33.2847,
-                        longitude: 131.4911,
-                        timeZoneID: "Asia/Tokyo",
-                        now: now
-                    )
-
-                    TimeZoneCard(
-                        abbreviation: "JST",
-                        city: "Hiroshima",
-                        countryCode: "JP",
-                        latitude: 34.3853,
-                        longitude: 132.4553,
-                        timeZoneID: "Asia/Tokyo",
-                        now: now
-                    )
-
-                    TimeZoneCard(
-                        abbreviation: "JST",
-                        city: "Sapporo",
-                        countryCode: "JP",
-                        latitude: 43.0618,
-                        longitude: 141.3545,
-                        timeZoneID: "Asia/Tokyo",
-                        now: now
-                    )
-
-                    TimeZoneCard(
-                        abbreviation: "JST",
-                        city: "Otaru",
-                        countryCode: "JP",
-                        latitude: 43.1888,
-                        longitude: 140.9876,
-                        timeZoneID: "Asia/Tokyo",
-                        now: now
-                    )
+        NavigationStack {
+            List {
+                ForEach(store.cities) { city in
+                    TimeZoneCard(city: city, now: now)
+                        .listRowBackground(Color.clear)
+                        .listRowSeparator(.hidden)
+                        .listRowInsets(EdgeInsets(top: 5, leading: 16, bottom: 5, trailing: 16))
                 }
-                .padding()
+                .onMove { source, destination in
+                    store.moveCities(from: source, to: destination)
+                }
+                .onDelete { offsets in
+                    store.removeCities(at: offsets)
+                }
+            }
+            .listStyle(.plain)
+            .scrollContentBackground(.hidden)
+            .background(
+                LinearGradient(
+                    colors: [Color.blue.opacity(0.08), Color.white.opacity(0.10)],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+                .ignoresSafeArea()
+            )
+            .navigationTitle("World Clock")
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    EditButton()
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        showingAddCity = true
+                    } label: {
+                        Image(systemName: "plus")
+                    }
+                }
+            }
+            .sheet(isPresented: $showingAddCity) {
+                AddCityView(store: store)
             }
         }
         .onReceive(timer) { now = $0 }
@@ -715,20 +837,16 @@ struct ContentView: View {
 // MARK: - Time Zone Card
 
 struct TimeZoneCard: View {
-    let abbreviation: String
-    let city: String
-    let countryCode: String
-    let latitude: Double
-    let longitude: Double
-    let timeZoneID: String
+    let city: City
     let now: Date
 
     @StateObject private var weather = WeatherManager()
     @State private var showingDetail = false
 
-    private var timeZone: TimeZone { TimeZone(identifier: timeZoneID)! }
+    private var timeZone: TimeZone { TimeZone(identifier: city.timeZoneID) ?? .current }
     private var hour: Int { Calendar.current.dateComponents(in: timeZone, from: now).hour ?? 12 }
     private var isDay: Bool { hour >= 6 && hour < 18 }
+    private var abbreviation: String { timeZone.abbreviation(for: now) ?? utcOffset() }
 
     var body: some View {
         HStack {
@@ -745,15 +863,37 @@ struct TimeZoneCard: View {
                 VStack(alignment: .leading, spacing: 2) {
                     HStack {
                         Text(abbreviation)
-                            .font(.title2.bold())
+                            .font(.subheadline.bold())
 
-                        Text(city)
+                        Text(city.city)
                             .foregroundStyle(.secondary)
                     }
 
                     Text(dayLabel())
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                }
+
+                HStack(spacing: 8) {
+                    HStack(spacing: 3) {
+                        Image(systemName: "sunrise.fill")
+                            .foregroundStyle(.orange)
+                        Text(weather.sunrise)
+                            .foregroundStyle(.orange)
+                    }
+                    .font(.caption2)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.85)
+
+                    HStack(spacing: 3) {
+                        Image(systemName: "sunset.fill")
+                            .foregroundStyle(.pink)
+                        Text(weather.sunset)
+                            .foregroundStyle(.pink)
+                    }
+                    .font(.caption2)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.85)
                 }
             }
 
@@ -764,7 +904,7 @@ struct TimeZoneCard: View {
                     .font(.system(size: 36, weight: .light))
                     .monospacedDigit()
 
-                HStack {
+                VStack(alignment: .trailing, spacing: 2) {
                     Label(isBusinessHours ? "Business Hours" : "After Hours", systemImage: "briefcase.fill")
                         .font(.caption2)
                         .foregroundStyle(isBusinessHours ? .green : .secondary)
@@ -777,16 +917,6 @@ struct TimeZoneCard: View {
                 Text(dateString())
                     .font(.headline)
                     .foregroundStyle(.secondary)
-
-                HStack(spacing: 10) {
-                    Label(weather.sunrise, systemImage: "sunrise.fill")
-                        .font(.caption2)
-                        .foregroundStyle(.orange)
-
-                    Label(weather.sunset, systemImage: "sunset.fill")
-                        .font(.caption2)
-                        .foregroundStyle(.pink)
-                }
             }
         }
         .padding(24)
@@ -802,16 +932,16 @@ struct TimeZoneCard: View {
         .onTapGesture {
             showingDetail = true
         }
-        .task {
-            await weather.load(latitude: latitude, longitude: longitude)
+        .task(id: city.id) {
+            await weather.load(latitude: city.latitude, longitude: city.longitude)
         }
         .sheet(isPresented: $showingDetail) {
             CityDetailView(
-                city: city,
+                city: city.city,
                 abbreviation: abbreviation,
-                countryCode: countryCode,
-                latitude: latitude,
-                longitude: longitude
+                countryCode: city.countryCode,
+                latitude: city.latitude,
+                longitude: city.longitude
             )
         }
     }
