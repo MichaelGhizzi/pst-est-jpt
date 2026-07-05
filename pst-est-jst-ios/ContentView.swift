@@ -30,6 +30,7 @@ enum WeatherCodeMapper {
 
 struct WeatherResponse: Codable {
     let current: CurrentWeather
+    let daily: SunTimes?
 }
 
 struct CurrentWeather: Codable {
@@ -37,14 +38,21 @@ struct CurrentWeather: Codable {
     let weather_code: Int
 }
 
+struct SunTimes: Codable {
+    let sunrise: [String]
+    let sunset: [String]
+}
+
 @MainActor
 class WeatherManager: ObservableObject {
     @Published var temperature = "--°"
     @Published var condition = "Loading..."
     @Published var icon = "cloud.fill"
+    @Published var sunrise = "--:--"
+    @Published var sunset = "--:--"
 
     func load(latitude: Double, longitude: Double) async {
-        guard let url = URL(string: "https://api.open-meteo.com/v1/forecast?latitude=\(latitude)&longitude=\(longitude)&current=temperature_2m,weather_code&temperature_unit=fahrenheit") else { return }
+        guard let url = URL(string: "https://api.open-meteo.com/v1/forecast?latitude=\(latitude)&longitude=\(longitude)&current=temperature_2m,weather_code&daily=sunrise,sunset&temperature_unit=fahrenheit&timezone=auto") else { return }
 
         do {
             let (data, _) = try await URLSession.shared.data(from: url)
@@ -54,11 +62,37 @@ class WeatherManager: ObservableObject {
             let mapped = WeatherCodeMapper.iconAndCondition(for: weather.current.weather_code)
             condition = mapped.condition
             icon = mapped.icon
+
+            if let firstSunrise = weather.daily?.sunrise.first {
+                sunrise = Self.formatSunTime(firstSunrise)
+            }
+            if let firstSunset = weather.daily?.sunset.first {
+                sunset = Self.formatSunTime(firstSunset)
+            }
         } catch {
             temperature = "--°"
             condition = "Unavailable"
             icon = "exclamationmark.triangle"
+            sunrise = "--:--"
+            sunset = "--:--"
         }
+    }
+
+    /// Open-Meteo returns naive local time strings like "2026-07-05T05:48" when
+    /// timezone=auto is set, so both parsing and formatting are pinned to UTC
+    /// here to preserve the wall-clock value instead of shifting it to the
+    /// device's own time zone.
+    private static func formatSunTime(_ isoString: String) -> String {
+        let inputFormatter = DateFormatter()
+        inputFormatter.dateFormat = "yyyy-MM-dd'T'HH:mm"
+        inputFormatter.timeZone = TimeZone(identifier: "UTC")
+
+        guard let parsed = inputFormatter.date(from: isoString) else { return "--:--" }
+
+        let outputFormatter = DateFormatter()
+        outputFormatter.dateFormat = "h:mm a"
+        outputFormatter.timeZone = TimeZone(identifier: "UTC")
+        return outputFormatter.string(from: parsed)
     }
 }
 
@@ -221,7 +255,7 @@ class CityEventsManager: ObservableObject {
 
     private func normalizedCityForTicketmaster(_ city: String) -> String {
         switch city.lowercased() {
-        case "orange county":
+        case "orange":
             return "Anaheim"
         default:
             return city
@@ -563,7 +597,7 @@ struct ContentView: View {
 
                     TimeZoneCard(
                         abbreviation: "PST",
-                        city: "Orange County",
+                        city: "Orange",
                         countryCode: "US",
                         latitude: 33.7174,
                         longitude: -117.8311,
@@ -743,6 +777,16 @@ struct TimeZoneCard: View {
                 Text(dateString())
                     .font(.headline)
                     .foregroundStyle(.secondary)
+
+                HStack(spacing: 10) {
+                    Label(weather.sunrise, systemImage: "sunrise.fill")
+                        .font(.caption2)
+                        .foregroundStyle(.orange)
+
+                    Label(weather.sunset, systemImage: "sunset.fill")
+                        .font(.caption2)
+                        .foregroundStyle(.pink)
+                }
             }
         }
         .padding(24)
