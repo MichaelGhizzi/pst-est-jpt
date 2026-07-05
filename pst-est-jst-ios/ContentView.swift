@@ -1,7 +1,32 @@
 import SwiftUI
 import Combine
 
-// MARK: - Weather
+// MARK: - Shared weather-code mapping
+
+enum WeatherCodeMapper {
+    static func iconAndCondition(for code: Int) -> (icon: String, condition: String) {
+        switch code {
+        case 0:
+            return ("sun.max.fill", "Clear")
+        case 1, 2, 3:
+            return ("cloud.sun.fill", "Partly Cloudy")
+        case 45, 48:
+            return ("cloud.fog.fill", "Fog")
+        case 51...67:
+            return ("cloud.rain.fill", "Rain")
+        case 71...77:
+            return ("snowflake", "Snow")
+        case 80...82:
+            return ("cloud.heavyrain.fill", "Showers")
+        case 95...99:
+            return ("cloud.bolt.rain.fill", "Storm")
+        default:
+            return ("cloud.fill", "Cloudy")
+        }
+    }
+}
+
+// MARK: - Weather (current conditions)
 
 struct WeatherResponse: Codable {
     let current: CurrentWeather
@@ -26,36 +51,102 @@ class WeatherManager: ObservableObject {
             let weather = try JSONDecoder().decode(WeatherResponse.self, from: data)
             temperature = "\(Int(weather.current.temperature_2m.rounded()))°"
 
-            switch weather.current.weather_code {
-            case 0:
-                condition = "Clear"
-                icon = "sun.max.fill"
-            case 1, 2, 3:
-                condition = "Partly Cloudy"
-                icon = "cloud.sun.fill"
-            case 45, 48:
-                condition = "Fog"
-                icon = "cloud.fog.fill"
-            case 51...67:
-                condition = "Rain"
-                icon = "cloud.rain.fill"
-            case 71...77:
-                condition = "Snow"
-                icon = "snowflake"
-            case 80...82:
-                condition = "Showers"
-                icon = "cloud.heavyrain.fill"
-            case 95...99:
-                condition = "Storm"
-                icon = "cloud.bolt.rain.fill"
-            default:
-                condition = "Cloudy"
-                icon = "cloud.fill"
-            }
+            let mapped = WeatherCodeMapper.iconAndCondition(for: weather.current.weather_code)
+            condition = mapped.condition
+            icon = mapped.icon
         } catch {
             temperature = "--°"
             condition = "Unavailable"
             icon = "exclamationmark.triangle"
+        }
+    }
+}
+
+// MARK: - 5-Day Forecast
+
+struct ForecastResponse: Codable {
+    let daily: DailyWeather
+}
+
+struct DailyWeather: Codable {
+    let time: [String]
+    let weather_code: [Int]
+    let temperature_2m_max: [Double]
+    let temperature_2m_min: [Double]
+}
+
+struct ForecastDay: Identifiable {
+    let id: String
+    let dayLabel: String
+    let icon: String
+    let condition: String
+    let high: Int
+    let low: Int
+}
+
+@MainActor
+class ForecastManager: ObservableObject {
+    @Published var days: [ForecastDay] = []
+    @Published var isLoading = false
+    @Published var errorMessage: String?
+
+    func load(latitude: Double, longitude: Double) async {
+        isLoading = true
+        errorMessage = nil
+        defer { isLoading = false }
+
+        guard let url = URL(string: "https://api.open-meteo.com/v1/forecast?latitude=\(latitude)&longitude=\(longitude)&daily=weather_code,temperature_2m_max,temperature_2m_min&temperature_unit=fahrenheit&forecast_days=7&timezone=auto") else {
+            errorMessage = "Couldn't build forecast request."
+            return
+        }
+
+        do {
+            let (data, response) = try await URLSession.shared.data(from: url)
+            guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
+                errorMessage = "Forecast unavailable right now."
+                return
+            }
+
+            let decoded = try JSONDecoder().decode(ForecastResponse.self, from: data)
+            days = Self.buildDays(from: decoded.daily)
+
+            if days.isEmpty {
+                errorMessage = "No forecast data available."
+            }
+        } catch {
+            errorMessage = "Couldn't load forecast: \(error.localizedDescription)"
+            days = []
+        }
+    }
+
+    private static func buildDays(from daily: DailyWeather) -> [ForecastDay] {
+        let inputFormatter = DateFormatter()
+        inputFormatter.dateFormat = "yyyy-MM-dd"
+
+        let labelFormatter = DateFormatter()
+        labelFormatter.dateFormat = "EEE"
+
+        let count = min(daily.time.count, daily.weather_code.count, daily.temperature_2m_max.count, daily.temperature_2m_min.count)
+
+        return (0..<count).map { index in
+            let dateString = daily.time[index]
+            let label: String
+            if let parsed = inputFormatter.date(from: dateString) {
+                label = index == 0 ? "Today" : labelFormatter.string(from: parsed)
+            } else {
+                label = dateString
+            }
+
+            let mapped = WeatherCodeMapper.iconAndCondition(for: daily.weather_code[index])
+
+            return ForecastDay(
+                id: dateString,
+                dayLabel: label,
+                icon: mapped.icon,
+                condition: mapped.condition,
+                high: Int(daily.temperature_2m_max[index].rounded()),
+                low: Int(daily.temperature_2m_min[index].rounded())
+            )
         }
     }
 }
@@ -272,6 +363,69 @@ struct TicketmasterClassification: Codable { let segment: TicketmasterSegment? }
 struct TicketmasterSegment: Codable { let name: String? }
 struct TicketmasterPriceRange: Codable { let min: Double? }
 
+// MARK: - Forecast Strip
+
+struct ForecastDayCard: View {
+    let day: ForecastDay
+
+    var body: some View {
+        VStack(spacing: 8) {
+            Text(day.dayLabel)
+                .font(.caption.bold())
+                .foregroundStyle(.secondary)
+
+            Image(systemName: day.icon)
+                .font(.system(size: 22))
+                .symbolRenderingMode(.multicolor)
+                .frame(height: 26)
+
+            Text("\(day.high)°")
+                .font(.subheadline.bold())
+
+            Text("\(day.low)°")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .frame(width: 64)
+        .padding(.vertical, 10)
+        .background(
+            RoundedRectangle(cornerRadius: 16)
+                .fill(Color.primary.opacity(0.05))
+        )
+    }
+}
+
+struct ForecastStripView: View {
+    @ObservedObject var forecast: ForecastManager
+
+    var body: some View {
+        Group {
+            if forecast.isLoading {
+                HStack {
+                    Spacer()
+                    ProgressView()
+                    Spacer()
+                }
+                .frame(height: 90)
+            } else if forecast.days.isEmpty {
+                Text(forecast.errorMessage ?? "Forecast unavailable.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, minHeight: 60)
+            } else {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 10) {
+                        ForEach(forecast.days) { day in
+                            ForecastDayCard(day: day)
+                        }
+                    }
+                    .padding(.vertical, 4)
+                }
+            }
+        }
+    }
+}
+
 // MARK: - Event Row
 
 struct EventRow: View {
@@ -331,26 +485,40 @@ struct CityDetailView: View {
     let city: String
     let abbreviation: String
     let countryCode: String
+    let latitude: Double
+    let longitude: Double
 
+    @StateObject private var forecast = ForecastManager()
     @StateObject private var events = CityEventsManager()
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
         NavigationStack {
-            Group {
-                if events.isLoading {
-                    ProgressView("Loading events…")
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                } else if events.events.isEmpty {
-                    ContentUnavailableFallback(message: events.errorMessage ?? "Nothing found.")
-                } else {
-                    List(events.events) { event in
-                        EventRow(event: event)
+            List {
+                Section("7-Day Forecast") {
+                    ForecastStripView(forecast: forecast)
+                        .listRowInsets(EdgeInsets(top: 6, leading: 12, bottom: 6, trailing: 12))
+                }
+
+                Section("What's Happening in \(city)") {
+                    if events.isLoading {
+                        HStack {
+                            Spacer()
+                            ProgressView("Loading events…")
+                            Spacer()
+                        }
+                    } else if events.events.isEmpty {
+                        Text(events.errorMessage ?? "Nothing found.")
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(events.events) { event in
+                            EventRow(event: event)
+                        }
                     }
-                    .listStyle(.plain)
                 }
             }
-            .navigationTitle("What's on in \(city)")
+            .listStyle(.insetGrouped)
+            .navigationTitle(city)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
@@ -358,25 +526,11 @@ struct CityDetailView: View {
                 }
             }
             .task {
-                await events.load(city: city, countryCode: countryCode)
+                async let forecastLoad: () = forecast.load(latitude: latitude, longitude: longitude)
+                async let eventsLoad: () = events.load(city: city, countryCode: countryCode)
+                _ = await (forecastLoad, eventsLoad)
             }
         }
-    }
-}
-
-struct ContentUnavailableFallback: View {
-    let message: String
-
-    var body: some View {
-        VStack(spacing: 8) {
-            Image(systemName: "calendar.badge.exclamationmark")
-                .font(.system(size: 32))
-                .foregroundStyle(.secondary)
-
-            Text(message)
-                .foregroundStyle(.secondary)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 
@@ -608,7 +762,13 @@ struct TimeZoneCard: View {
             await weather.load(latitude: latitude, longitude: longitude)
         }
         .sheet(isPresented: $showingDetail) {
-            CityDetailView(city: city, abbreviation: abbreviation, countryCode: countryCode)
+            CityDetailView(
+                city: city,
+                abbreviation: abbreviation,
+                countryCode: countryCode,
+                latitude: latitude,
+                longitude: longitude
+            )
         }
     }
 
