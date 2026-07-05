@@ -877,9 +877,9 @@ struct TimeZoneCard: View {
                 HStack(spacing: 8) {
                     HStack(spacing: 3) {
                         Image(systemName: "sunrise.fill")
-                            .foregroundStyle(.orange)
+                            .foregroundStyle(.yellow)
                         Text(weather.sunrise)
-                            .foregroundStyle(.orange)
+                            .foregroundStyle(.yellow)
                     }
                     .font(.caption2)
                     .lineLimit(1)
@@ -887,9 +887,9 @@ struct TimeZoneCard: View {
 
                     HStack(spacing: 3) {
                         Image(systemName: "sunset.fill")
-                            .foregroundStyle(.pink)
+                            .foregroundStyle(.blue)
                         Text(weather.sunset)
-                            .foregroundStyle(.pink)
+                            .foregroundStyle(.blue)
                     }
                     .font(.caption2)
                     .lineLimit(1)

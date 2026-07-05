@@ -1,0 +1,14 @@
+<svg width="1024" height="1024" viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg">
+<defs>
+<linearGradient id="duskGrad" x1="0" y1="0" x2="0" y2="1">
+<stop offset="0%" stop-color="#2E2A63"/>
+<stop offset="55%" stop-color="#7A4A6B"/>
+<stop offset="100%" stop-color="#E4A464"/>
+</linearGradient>
+</defs>
+<rect x="0" y="0" width="200" height="200" rx="44" fill="url(#duskGrad)"/>
+<path d="M100,45 A55,55 0 0,0 100,155 Z" fill="#2C2A5C"/>
+<path d="M100,45 A55,55 0 0,1 100,155 Z" fill="#F4B942"/>
+<ellipse cx="100" cy="100" rx="85" ry="30" fill="none" stroke="#FFFFFF" stroke-opacity="0.55" stroke-width="2"/>
+<circle cx="182" cy="88" r="6" fill="#FFFFFF"/>
+</svg>
