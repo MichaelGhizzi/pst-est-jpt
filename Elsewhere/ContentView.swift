@@ -851,6 +851,16 @@ struct TimeZoneCard: View {
     var body: some View {
         HStack {
             VStack(alignment: .leading, spacing: 12) {
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack {
+                        Text(city.city)
+                            .font(.subheadline.bold())
+                        
+                        Text(abbreviation)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
                 HStack {
                     weatherIcon
                     Text(weather.temperature)
@@ -860,26 +870,12 @@ struct TimeZoneCard: View {
                         .foregroundStyle(.secondary)
                 }
 
-                VStack(alignment: .leading, spacing: 2) {
-                    HStack {
-                        Text(abbreviation)
-                            .font(.subheadline.bold())
-
-                        Text(city.city)
-                            .foregroundStyle(.secondary)
-                    }
-
-                    Text(dayLabel())
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-
                 HStack(spacing: 8) {
                     HStack(spacing: 3) {
                         Image(systemName: "sunrise.fill")
                             .foregroundStyle(.yellow)
                         Text(weather.sunrise)
-                            .foregroundStyle(.yellow)
+                            .foregroundStyle(.gray)
                     }
                     .font(.caption2)
                     .lineLimit(1)
@@ -889,7 +885,7 @@ struct TimeZoneCard: View {
                         Image(systemName: "sunset.fill")
                             .foregroundStyle(.blue)
                         Text(weather.sunset)
-                            .foregroundStyle(.blue)
+                            .foregroundStyle(.gray)
                     }
                     .font(.caption2)
                     .lineLimit(1)
@@ -914,9 +910,15 @@ struct TimeZoneCard: View {
                         .foregroundStyle(.tertiary)
                 }
 
-                Text(dateString())
-                    .font(.headline)
-                    .foregroundStyle(.secondary)
+                HStack{
+                    Text(dayLabel())
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    
+                    Text(dateString())
+                        .font(.headline)
+                        .foregroundStyle(.secondary)
+                }
             }
         }
         .padding(24)
