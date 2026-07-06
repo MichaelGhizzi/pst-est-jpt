@@ -1,6 +1,64 @@
 import SwiftUI
 import Combine
 
+// MARK: - App Settings (units + time format), persisted to UserDefaults
+
+enum TemperatureUnit: String {
+    case fahrenheit, celsius
+
+    var apiParam: String { rawValue }
+    var suffix: String { self == .fahrenheit ? "F" : "C" }
+}
+
+@MainActor
+class AppSettings: ObservableObject {
+    @Published var useFahrenheit: Bool {
+        didSet { UserDefaults.standard.set(useFahrenheit, forKey: Keys.useFahrenheit) }
+    }
+    @Published var use24Hour: Bool {
+        didSet { UserDefaults.standard.set(use24Hour, forKey: Keys.use24Hour) }
+    }
+
+    private enum Keys {
+        static let useFahrenheit = "settings.useFahrenheit"
+        static let use24Hour = "settings.use24Hour"
+    }
+
+    init() {
+        let defaults = UserDefaults.standard
+        self.useFahrenheit = defaults.object(forKey: Keys.useFahrenheit) as? Bool ?? true
+        self.use24Hour = defaults.object(forKey: Keys.use24Hour) as? Bool ?? false
+    }
+
+    var temperatureUnit: TemperatureUnit { useFahrenheit ? .fahrenheit : .celsius }
+    var clockFormat: String { use24Hour ? "HH:mm" : "h:mm a" }
+}
+
+struct SettingsView: View {
+    @EnvironmentObject var settings: AppSettings
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Temperature") {
+                    Toggle("Use Fahrenheit", isOn: $settings.useFahrenheit)
+                }
+                Section("Time") {
+                    Toggle("Use 24-Hour Time", isOn: $settings.use24Hour)
+                }
+            }
+            .navigationTitle("Settings")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Done") { dismiss() }
+                }
+            }
+        }
+    }
+}
+
 // MARK: - Shared weather-code mapping
 
 enum WeatherCodeMapper {
@@ -26,6 +84,36 @@ enum WeatherCodeMapper {
     }
 }
 
+// MARK: - Moon phase (local calculation, no network call)
+
+enum MoonPhaseCalculator {
+    struct Phase {
+        let name: String
+        let icon: String
+    }
+
+    /// Reference new moon: Jan 6, 2000 18:14 UTC. Synodic month ~29.53059 days.
+    /// This is an approximation (accurate to roughly +/- a few hours), which is
+    /// plenty for a glanceable "what's the moon doing tonight" indicator.
+    static func phase(for date: Date) -> Phase {
+        let knownNewMoon = Date(timeIntervalSince1970: 947_182_440)
+        let synodicMonth = 29.53058867
+        let daysSince = date.timeIntervalSince(knownNewMoon) / 86400
+        var age = daysSince.truncatingRemainder(dividingBy: synodicMonth)
+        if age < 0 { age += synodicMonth }
+
+        let names = ["New Moon", "Waxing Crescent", "First Quarter", "Waxing Gibbous",
+                     "Full Moon", "Waning Gibbous", "Last Quarter", "Waning Crescent"]
+        let icons = ["moonphase.new.moon", "moonphase.waxing.crescent", "moonphase.first.quarter",
+                     "moonphase.waxing.gibbous", "moonphase.full.moon", "moonphase.waning.gibbous",
+                     "moonphase.last.quarter", "moonphase.waning.crescent"]
+
+        let slice = synodicMonth / 8
+        let index = Int((age / slice).rounded()) % 8
+        return Phase(name: names[index], icon: icons[index])
+    }
+}
+
 // MARK: - Weather (current conditions)
 
 struct WeatherResponse: Codable {
@@ -43,6 +131,15 @@ struct SunTimes: Codable {
     let sunset: [String]
 }
 
+private struct CachedWeather: Codable {
+    var temperature: String
+    var condition: String
+    var icon: String
+    var sunrise: String
+    var sunset: String
+    var cachedAt: Date
+}
+
 @MainActor
 class WeatherManager: ObservableObject {
     @Published var temperature = "--°"
@@ -50,31 +147,47 @@ class WeatherManager: ObservableObject {
     @Published var icon = "cloud.fill"
     @Published var sunrise = "--:--"
     @Published var sunset = "--:--"
+    @Published var isOffline = false
 
-    func load(latitude: Double, longitude: Double) async {
-        guard let url = URL(string: "https://api.open-meteo.com/v1/forecast?latitude=\(latitude)&longitude=\(longitude)&current=temperature_2m,weather_code&daily=sunrise,sunset&temperature_unit=fahrenheit&timezone=auto") else { return }
+    private func cacheKey(_ cityID: UUID) -> String { "weather.cache.\(cityID.uuidString)" }
+
+    func load(cityID: UUID, latitude: Double, longitude: Double, units: TemperatureUnit, use24Hour: Bool) async {
+        guard let url = URL(string: "https://api.open-meteo.com/v1/forecast?latitude=\(latitude)&longitude=\(longitude)&current=temperature_2m,weather_code&daily=sunrise,sunset&temperature_unit=\(units.apiParam)&timezone=auto") else { return }
 
         do {
             let (data, _) = try await URLSession.shared.data(from: url)
             let weather = try JSONDecoder().decode(WeatherResponse.self, from: data)
-            temperature = "\(Int(weather.current.temperature_2m.rounded()))°"
+            temperature = "\(Int(weather.current.temperature_2m.rounded()))°\(units.suffix)"
 
             let mapped = WeatherCodeMapper.iconAndCondition(for: weather.current.weather_code)
             condition = mapped.condition
             icon = mapped.icon
 
             if let firstSunrise = weather.daily?.sunrise.first {
-                sunrise = Self.formatSunTime(firstSunrise)
+                sunrise = Self.formatSunTime(firstSunrise, use24Hour: use24Hour)
             }
             if let firstSunset = weather.daily?.sunset.first {
-                sunset = Self.formatSunTime(firstSunset)
+                sunset = Self.formatSunTime(firstSunset, use24Hour: use24Hour)
             }
+
+            isOffline = false
+            saveCache(cityID: cityID)
         } catch {
-            temperature = "--°"
-            condition = "Unavailable"
-            icon = "exclamationmark.triangle"
-            sunrise = "--:--"
-            sunset = "--:--"
+            if let cached = loadCache(cityID: cityID) {
+                temperature = cached.temperature
+                condition = cached.condition
+                icon = cached.icon
+                sunrise = cached.sunrise
+                sunset = cached.sunset
+                isOffline = true
+            } else {
+                temperature = "--°"
+                condition = "Unavailable"
+                icon = "exclamationmark.triangle"
+                sunrise = "--:--"
+                sunset = "--:--"
+                isOffline = false
+            }
         }
     }
 
@@ -82,7 +195,7 @@ class WeatherManager: ObservableObject {
     /// timezone=auto is set, so both parsing and formatting are pinned to UTC
     /// here to preserve the wall-clock value instead of shifting it to the
     /// device's own time zone.
-    private static func formatSunTime(_ isoString: String) -> String {
+    private static func formatSunTime(_ isoString: String, use24Hour: Bool) -> String {
         let inputFormatter = DateFormatter()
         inputFormatter.dateFormat = "yyyy-MM-dd'T'HH:mm"
         inputFormatter.timeZone = TimeZone(identifier: "UTC")
@@ -90,13 +203,27 @@ class WeatherManager: ObservableObject {
         guard let parsed = inputFormatter.date(from: isoString) else { return "--:--" }
 
         let outputFormatter = DateFormatter()
-        outputFormatter.dateFormat = "h:mm a"
+        outputFormatter.dateFormat = use24Hour ? "HH:mm" : "h:mm a"
         outputFormatter.timeZone = TimeZone(identifier: "UTC")
         return outputFormatter.string(from: parsed)
     }
+
+    private func saveCache(cityID: UUID) {
+        let cached = CachedWeather(temperature: temperature, condition: condition, icon: icon,
+                                    sunrise: sunrise, sunset: sunset, cachedAt: Date())
+        if let data = try? JSONEncoder().encode(cached) {
+            UserDefaults.standard.set(data, forKey: cacheKey(cityID))
+        }
+    }
+
+    private func loadCache(cityID: UUID) -> CachedWeather? {
+        guard let data = UserDefaults.standard.data(forKey: cacheKey(cityID)),
+              let cached = try? JSONDecoder().decode(CachedWeather.self, from: data) else { return nil }
+        return cached
+    }
 }
 
-// MARK: - 5-Day Forecast
+// MARK: - 7-Day Forecast
 
 struct ForecastResponse: Codable {
     let daily: DailyWeather
@@ -109,7 +236,7 @@ struct DailyWeather: Codable {
     let temperature_2m_min: [Double]
 }
 
-struct ForecastDay: Identifiable {
+struct ForecastDay: Identifiable, Codable {
     let id: String
     let dayLabel: String
     let icon: String
@@ -118,18 +245,27 @@ struct ForecastDay: Identifiable {
     let low: Int
 }
 
+private struct CachedForecast: Codable {
+    var days: [ForecastDay]
+    var cachedAt: Date
+}
+
 @MainActor
 class ForecastManager: ObservableObject {
     @Published var days: [ForecastDay] = []
     @Published var isLoading = false
     @Published var errorMessage: String?
+    @Published var isOffline = false
 
-    func load(latitude: Double, longitude: Double) async {
+    private func cacheKey(_ cityID: UUID) -> String { "forecast.cache.\(cityID.uuidString)" }
+
+    func load(cityID: UUID, latitude: Double, longitude: Double, units: TemperatureUnit) async {
         isLoading = true
         errorMessage = nil
+        isOffline = false
         defer { isLoading = false }
 
-        guard let url = URL(string: "https://api.open-meteo.com/v1/forecast?latitude=\(latitude)&longitude=\(longitude)&daily=weather_code,temperature_2m_max,temperature_2m_min&temperature_unit=fahrenheit&forecast_days=7&timezone=auto") else {
+        guard let url = URL(string: "https://api.open-meteo.com/v1/forecast?latitude=\(latitude)&longitude=\(longitude)&daily=weather_code,temperature_2m_max,temperature_2m_min&temperature_unit=\(units.apiParam)&forecast_days=7&timezone=auto") else {
             errorMessage = "Couldn't build forecast request."
             return
         }
@@ -137,23 +273,32 @@ class ForecastManager: ObservableObject {
         do {
             let (data, response) = try await URLSession.shared.data(from: url)
             guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
-                errorMessage = "Forecast unavailable right now."
-                return
+                throw URLError(.badServerResponse)
             }
 
             let decoded = try JSONDecoder().decode(ForecastResponse.self, from: data)
-            days = Self.buildDays(from: decoded.daily)
+            days = Self.buildDays(from: decoded.daily, unitSuffix: units.suffix)
 
             if days.isEmpty {
                 errorMessage = "No forecast data available."
+            } else {
+                saveCache(cityID: cityID)
             }
         } catch {
-            errorMessage = "Couldn't load forecast: \(error.localizedDescription)"
-            days = []
+            if let cached = loadCache(cityID: cityID) {
+                days = cached.days
+                isOffline = true
+                let formatter = RelativeDateTimeFormatter()
+                let ago = formatter.localizedString(for: cached.cachedAt, relativeTo: Date())
+                errorMessage = "Showing saved forecast from \(ago)."
+            } else {
+                errorMessage = "Couldn't load forecast: \(error.localizedDescription)"
+                days = []
+            }
         }
     }
 
-    private static func buildDays(from daily: DailyWeather) -> [ForecastDay] {
+    private static func buildDays(from daily: DailyWeather, unitSuffix: String) -> [ForecastDay] {
         let inputFormatter = DateFormatter()
         inputFormatter.dateFormat = "yyyy-MM-dd"
 
@@ -182,6 +327,19 @@ class ForecastManager: ObservableObject {
                 low: Int(daily.temperature_2m_min[index].rounded())
             )
         }
+    }
+
+    private func saveCache(cityID: UUID) {
+        let cached = CachedForecast(days: days, cachedAt: Date())
+        if let data = try? JSONEncoder().encode(cached) {
+            UserDefaults.standard.set(data, forKey: cacheKey(cityID))
+        }
+    }
+
+    private func loadCache(cityID: UUID) -> CachedForecast? {
+        guard let data = UserDefaults.standard.data(forKey: cacheKey(cityID)),
+              let cached = try? JSONDecoder().decode(CachedForecast.self, from: data) else { return nil }
+        return cached
     }
 }
 
@@ -447,13 +605,20 @@ struct ForecastStripView: View {
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, minHeight: 60)
             } else {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 10) {
-                        ForEach(forecast.days) { day in
-                            ForecastDayCard(day: day)
-                        }
+                VStack(alignment: .leading, spacing: 6) {
+                    if forecast.isOffline, let message = forecast.errorMessage {
+                        Label(message, systemImage: "wifi.slash")
+                            .font(.caption2)
+                            .foregroundStyle(.orange)
                     }
-                    .padding(.vertical, 4)
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 10) {
+                            ForEach(forecast.days) { day in
+                                ForecastDayCard(day: day)
+                            }
+                        }
+                        .padding(.vertical, 4)
+                    }
                 }
             }
         }
@@ -516,12 +681,14 @@ struct EventRow: View {
 // MARK: - Detail View
 
 struct CityDetailView: View {
+    let cityID: UUID
     let city: String
     let abbreviation: String
     let countryCode: String
     let latitude: Double
     let longitude: Double
 
+    @EnvironmentObject var settings: AppSettings
     @StateObject private var forecast = ForecastManager()
     @StateObject private var events = CityEventsManager()
     @Environment(\.dismiss) private var dismiss
@@ -560,7 +727,7 @@ struct CityDetailView: View {
                 }
             }
             .task {
-                async let forecastLoad: () = forecast.load(latitude: latitude, longitude: longitude)
+                async let forecastLoad: () = forecast.load(cityID: cityID, latitude: latitude, longitude: longitude, units: settings.temperatureUnit)
                 async let eventsLoad: () = events.load(city: city, countryCode: countryCode)
                 _ = await (forecastLoad, eventsLoad)
             }
@@ -577,14 +744,33 @@ struct City: Identifiable, Codable, Equatable {
     var latitude: Double
     var longitude: Double
     var timeZoneID: String
+    var isFavorite: Bool
 
-    init(id: UUID = UUID(), city: String, countryCode: String, latitude: Double, longitude: Double, timeZoneID: String) {
+    init(id: UUID = UUID(), city: String, countryCode: String, latitude: Double, longitude: Double, timeZoneID: String, isFavorite: Bool = false) {
         self.id = id
         self.city = city
         self.countryCode = countryCode
         self.latitude = latitude
         self.longitude = longitude
         self.timeZoneID = timeZoneID
+        self.isFavorite = isFavorite
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id, city, countryCode, latitude, longitude, timeZoneID, isFavorite
+    }
+
+    // Custom decoding keeps this backward-compatible with cities saved before
+    // `isFavorite` existed — missing key just defaults to false.
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        city = try container.decode(String.self, forKey: .city)
+        countryCode = try container.decode(String.self, forKey: .countryCode)
+        latitude = try container.decode(Double.self, forKey: .latitude)
+        longitude = try container.decode(Double.self, forKey: .longitude)
+        timeZoneID = try container.decode(String.self, forKey: .timeZoneID)
+        isFavorite = try container.decodeIfPresent(Bool.self, forKey: .isFavorite) ?? false
     }
 }
 
@@ -609,12 +795,34 @@ class CityStore: ObservableObject {
         cities.append(city)
     }
 
-    func removeCities(at offsets: IndexSet) {
-        cities.remove(atOffsets: offsets)
+    func toggleFavorite(_ id: UUID) {
+        guard let index = cities.firstIndex(where: { $0.id == id }) else { return }
+        cities[index].isFavorite.toggle()
     }
 
-    func moveCities(from source: IndexSet, to destination: Int) {
-        cities.move(fromOffsets: source, toOffset: destination)
+    /// Favorites pinned to the top; stable order preserved within each group.
+    var sortedCities: [City] {
+        cities.enumerated().sorted { a, b in
+            if a.element.isFavorite != b.element.isFavorite {
+                return a.element.isFavorite
+            }
+            return a.offset < b.offset
+        }.map(\.element)
+    }
+
+    /// Drag-to-reorder and swipe-to-delete operate on the displayed
+    /// (favorites-pinned) order, so offsets need to be resolved against
+    /// `sortedCities` rather than the raw storage array.
+    func moveDisplayed(from source: IndexSet, to destination: Int) {
+        var displayed = sortedCities
+        displayed.move(fromOffsets: source, toOffset: destination)
+        cities = displayed
+    }
+
+    func removeDisplayed(at offsets: IndexSet) {
+        let displayed = sortedCities
+        let idsToRemove = Set(offsets.map { displayed[$0].id })
+        cities.removeAll { idsToRemove.contains($0.id) }
     }
 
     private func save() {
@@ -783,24 +991,34 @@ struct AddCityView: View {
 
 struct ContentView: View {
     @StateObject private var store = CityStore()
+    @StateObject private var settings = AppSettings()
     @State private var now = Date()
     @State private var showingAddCity = false
+    @State private var showingSettings = false
     let timer = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
 
     var body: some View {
         NavigationStack {
             List {
-                ForEach(store.cities) { city in
-                    TimeZoneCard(city: city, now: now)
+                ForEach(store.sortedCities) { city in
+                    TimeZoneCard(city: city, now: now, store: store)
                         .listRowBackground(Color.clear)
                         .listRowSeparator(.hidden)
                         .listRowInsets(EdgeInsets(top: 5, leading: 16, bottom: 5, trailing: 16))
+                        .swipeActions(edge: .leading) {
+                            Button {
+                                store.toggleFavorite(city.id)
+                            } label: {
+                                Label(city.isFavorite ? "Unfavorite" : "Favorite", systemImage: "star.fill")
+                            }
+                            .tint(.yellow)
+                        }
                 }
                 .onMove { source, destination in
-                    store.moveCities(from: source, to: destination)
+                    store.moveDisplayed(from: source, to: destination)
                 }
                 .onDelete { offsets in
-                    store.removeCities(at: offsets)
+                    store.removeDisplayed(at: offsets)
                 }
             }
             .listStyle(.plain)
@@ -819,17 +1037,30 @@ struct ContentView: View {
                     EditButton()
                 }
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button {
-                        showingAddCity = true
-                    } label: {
-                        Image(systemName: "plus")
+                    HStack(spacing: 16) {
+                        Button {
+                            showingSettings = true
+                        } label: {
+                            Image(systemName: "gearshape")
+                        }
+                        Button {
+                            showingAddCity = true
+                        } label: {
+                            Image(systemName: "plus")
+                        }
                     }
                 }
             }
             .sheet(isPresented: $showingAddCity) {
                 AddCityView(store: store)
+                    .environmentObject(settings)
+            }
+            .sheet(isPresented: $showingSettings) {
+                SettingsView()
+                    .environmentObject(settings)
             }
         }
+        .environmentObject(settings)
         .onReceive(timer) { now = $0 }
     }
 }
@@ -839,7 +1070,9 @@ struct ContentView: View {
 struct TimeZoneCard: View {
     let city: City
     let now: Date
+    @ObservedObject var store: CityStore
 
+    @EnvironmentObject var settings: AppSettings
     @StateObject private var weather = WeatherManager()
     @State private var showingDetail = false
 
@@ -852,12 +1085,18 @@ struct TimeZoneCard: View {
         HStack {
             VStack(alignment: .leading, spacing: 12) {
                 VStack(alignment: .leading, spacing: 2) {
-                    HStack {
+                    HStack(spacing: 6) {
+                        Button {
+                            store.toggleFavorite(city.id)
+                        } label: {
+                            Image(systemName: city.isFavorite ? "star.fill" : "star")
+                                .font(.caption)
+                                .foregroundStyle(city.isFavorite ? .yellow : .secondary)
+                        }
+                        .buttonStyle(.plain)
+
                         Text(city.city)
                             .font(.headline.bold())
-                        
-//                        Text(abbreviation)
-//                            .foregroundStyle(.secondary)
                     }
                 }
 
@@ -868,6 +1107,11 @@ struct TimeZoneCard: View {
                     Text(weather.condition)
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                    if weather.isOffline {
+                        Image(systemName: "wifi.slash")
+                            .font(.caption2)
+                            .foregroundStyle(.orange)
+                    }
                 }
 
                 HStack(spacing: 8) {
@@ -885,6 +1129,19 @@ struct TimeZoneCard: View {
                         Image(systemName: "sunset.fill")
                             .foregroundStyle(.blue)
                         Text(weather.sunset)
+                            .foregroundStyle(.gray)
+                    }
+                    .font(.caption2)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.85)
+                }
+
+                if !isDay {
+                    let moon = MoonPhaseCalculator.phase(for: now)
+                    HStack(spacing: 3) {
+                        Image(systemName: moon.icon)
+                            .foregroundStyle(.indigo)
+                        Text(moon.name)
                             .foregroundStyle(.gray)
                     }
                     .font(.caption2)
@@ -934,17 +1191,19 @@ struct TimeZoneCard: View {
         .onTapGesture {
             showingDetail = true
         }
-        .task(id: city.id) {
-            await weather.load(latitude: city.latitude, longitude: city.longitude)
+        .task(id: "\(city.id)-\(settings.useFahrenheit)-\(settings.use24Hour)") {
+            await weather.load(cityID: city.id, latitude: city.latitude, longitude: city.longitude, units: settings.temperatureUnit, use24Hour: settings.use24Hour)
         }
         .sheet(isPresented: $showingDetail) {
             CityDetailView(
+                cityID: city.id,
                 city: city.city,
                 abbreviation: abbreviation,
                 countryCode: city.countryCode,
                 latitude: city.latitude,
                 longitude: city.longitude
             )
+            .environmentObject(settings)
         }
     }
 
@@ -999,7 +1258,7 @@ struct TimeZoneCard: View {
     func timeString() -> String {
         let formatter = DateFormatter()
         formatter.timeZone = timeZone
-        formatter.dateFormat = "h:mm a"
+        formatter.dateFormat = settings.clockFormat
         return formatter.string(from: now)
     }
 
