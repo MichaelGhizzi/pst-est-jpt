@@ -813,7 +813,7 @@ struct ContentView: View {
                 )
                 .ignoresSafeArea()
             )
-            .navigationTitle("World Clock")
+            .navigationTitle("Elsewhere")
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     EditButton()
@@ -854,10 +854,10 @@ struct TimeZoneCard: View {
                 VStack(alignment: .leading, spacing: 2) {
                     HStack {
                         Text(city.city)
-                            .font(.subheadline.bold())
+                            .font(.headline.bold())
                         
-                        Text(abbreviation)
-                            .foregroundStyle(.secondary)
+//                        Text(abbreviation)
+//                            .foregroundStyle(.secondary)
                     }
                 }
 
