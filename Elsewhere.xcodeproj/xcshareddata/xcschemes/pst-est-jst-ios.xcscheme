@@ -16,7 +16,7 @@
             <BuildableReference
                BuildableIdentifier = "primary"
                BlueprintIdentifier = "12C683E22FF60AFF0047FC9E"
-               BuildableName = "pst-est-jst-ios.app"
+               BuildableName = "Elsewhere.app"
                BlueprintName = "pst-est-jst-ios"
                ReferencedContainer = "container:Elsewhere.xcodeproj">
             </BuildableReference>
@@ -46,7 +46,7 @@
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "12C683E22FF60AFF0047FC9E"
-            BuildableName = "pst-est-jst-ios.app"
+            BuildableName = "Elsewhere.app"
             BlueprintName = "pst-est-jst-ios"
             ReferencedContainer = "container:Elsewhere.xcodeproj">
          </BuildableReference>
@@ -63,7 +63,7 @@
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "12C683E22FF60AFF0047FC9E"
-            BuildableName = "pst-est-jst-ios.app"
+            BuildableName = "Elsewhere.app"
             BlueprintName = "pst-est-jst-ios"
             ReferencedContainer = "container:Elsewhere.xcodeproj">
          </BuildableReference>

@@ -84,6 +84,29 @@ enum WeatherCodeMapper {
     }
 }
 
+// MARK: - Air Quality Index mapping (US AQI scale)
+
+enum AQICategory {
+    static func info(for aqi: Int) -> (label: String, color: Color) {
+        switch aqi {
+        case ..<0:
+            return ("Unknown", .gray)
+        case 0...50:
+            return ("Good", .green)
+        case 51...100:
+            return ("Moderate", .yellow)
+        case 101...150:
+            return ("Unhealthy (Sensitive)", .orange)
+        case 151...200:
+            return ("Unhealthy", .red)
+        case 201...300:
+            return ("Very Unhealthy", .purple)
+        default:
+            return ("Hazardous", Color(red: 0.5, green: 0.0, blue: 0.13))
+        }
+    }
+}
+
 // MARK: - Moon phase (local calculation, no network call)
 
 enum MoonPhaseCalculator {
@@ -219,6 +242,65 @@ class WeatherManager: ObservableObject {
     private func loadCache(cityID: UUID) -> CachedWeather? {
         guard let data = UserDefaults.standard.data(forKey: cacheKey(cityID)),
               let cached = try? JSONDecoder().decode(CachedWeather.self, from: data) else { return nil }
+        return cached
+    }
+}
+
+// MARK: - Air Quality (current AQI)
+
+struct AirQualityResponse: Codable {
+    let current: AirQualityCurrent
+}
+
+struct AirQualityCurrent: Codable {
+    let us_aqi: Double?
+}
+
+private struct CachedAirQuality: Codable {
+    var aqi: Int
+    var cachedAt: Date
+}
+
+@MainActor
+class AirQualityManager: ObservableObject {
+    @Published var aqi: Int?
+    @Published var isOffline = false
+
+    private func cacheKey(_ cityID: UUID) -> String { "airquality.cache.\(cityID.uuidString)" }
+
+    func load(cityID: UUID, latitude: Double, longitude: Double) async {
+        guard let url = URL(string: "https://air-quality-api.open-meteo.com/v1/air-quality?latitude=\(latitude)&longitude=\(longitude)&current=us_aqi&timezone=auto") else { return }
+
+        do {
+            let (data, _) = try await URLSession.shared.data(from: url)
+            let decoded = try JSONDecoder().decode(AirQualityResponse.self, from: data)
+            guard let value = decoded.current.us_aqi else { throw URLError(.cannotParseResponse) }
+
+            let rounded = Int(value.rounded())
+            aqi = rounded
+            isOffline = false
+            saveCache(cityID: cityID, value: rounded)
+        } catch {
+            if let cached = loadCache(cityID: cityID) {
+                aqi = cached.aqi
+                isOffline = true
+            } else {
+                aqi = nil
+                isOffline = false
+            }
+        }
+    }
+
+    private func saveCache(cityID: UUID, value: Int) {
+        let cached = CachedAirQuality(aqi: value, cachedAt: Date())
+        if let data = try? JSONEncoder().encode(cached) {
+            UserDefaults.standard.set(data, forKey: cacheKey(cityID))
+        }
+    }
+
+    private func loadCache(cityID: UUID) -> CachedAirQuality? {
+        guard let data = UserDefaults.standard.data(forKey: cacheKey(cityID)),
+              let cached = try? JSONDecoder().decode(CachedAirQuality.self, from: data) else { return nil }
         return cached
     }
 }
@@ -625,6 +707,47 @@ struct ForecastStripView: View {
     }
 }
 
+// MARK: - Air Quality Row (used in the detail sheet)
+
+struct AirQualityRow: View {
+    @ObservedObject var airQuality: AirQualityManager
+
+    var body: some View {
+        Group {
+            if let aqi = airQuality.aqi {
+                let info = AQICategory.info(for: aqi)
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(spacing: 10) {
+                        Circle()
+                            .fill(info.color)
+                            .frame(width: 14, height: 14)
+
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("AQI \(aqi)")
+                                .font(.headline)
+                            Text(info.label)
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                        }
+
+                        Spacer()
+                    }
+
+                    if airQuality.isOffline {
+                        Label("Showing saved reading", systemImage: "wifi.slash")
+                            .font(.caption2)
+                            .foregroundStyle(.orange)
+                    }
+                }
+            } else {
+                Text("Air quality unavailable.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+}
+
 // MARK: - Event Row
 
 struct EventRow: View {
@@ -690,6 +813,7 @@ struct CityDetailView: View {
 
     @EnvironmentObject var settings: AppSettings
     @StateObject private var forecast = ForecastManager()
+    @StateObject private var airQuality = AirQualityManager()
     @StateObject private var events = CityEventsManager()
     @Environment(\.dismiss) private var dismiss
 
@@ -699,6 +823,10 @@ struct CityDetailView: View {
                 Section("7-Day Forecast") {
                     ForecastStripView(forecast: forecast)
                         .listRowInsets(EdgeInsets(top: 6, leading: 12, bottom: 6, trailing: 12))
+                }
+
+                Section("Air Quality") {
+                    AirQualityRow(airQuality: airQuality)
                 }
 
                 Section("What's Happening in \(city)") {
@@ -728,8 +856,9 @@ struct CityDetailView: View {
             }
             .task {
                 async let forecastLoad: () = forecast.load(cityID: cityID, latitude: latitude, longitude: longitude, units: settings.temperatureUnit)
+                async let airQualityLoad: () = airQuality.load(cityID: cityID, latitude: latitude, longitude: longitude)
                 async let eventsLoad: () = events.load(city: city, countryCode: countryCode)
-                _ = await (forecastLoad, eventsLoad)
+                _ = await (forecastLoad, airQualityLoad, eventsLoad)
             }
         }
     }
@@ -1074,7 +1203,9 @@ struct TimeZoneCard: View {
 
     @EnvironmentObject var settings: AppSettings
     @StateObject private var weather = WeatherManager()
+    @StateObject private var airQuality = AirQualityManager()
     @State private var showingDetail = false
+    @State private var showingConditionBubble = false
 
     private var timeZone: TimeZone { TimeZone(identifier: city.timeZoneID) ?? .current }
     private var hour: Int { Calendar.current.dateComponents(in: timeZone, from: now).hour ?? 12 }
@@ -1102,11 +1233,17 @@ struct TimeZoneCard: View {
 
                 HStack {
                     weatherIcon
+                        .onTapGesture {
+                            showingConditionBubble = true
+                        }
+                        .popover(isPresented: $showingConditionBubble) {
+                            Text(weather.condition)
+                                .font(.subheadline)
+                                .padding(12)
+                                .presentationCompactAdaptation(.popover)
+                        }
                     Text(weather.temperature)
                         .font(.title3.bold())
-                    Text(weather.condition)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
                     if weather.isOffline {
                         Image(systemName: "wifi.slash")
                             .font(.caption2)
@@ -1136,17 +1273,40 @@ struct TimeZoneCard: View {
                     .minimumScaleFactor(0.85)
                 }
 
-                if !isDay {
-                    let moon = MoonPhaseCalculator.phase(for: now)
-                    HStack(spacing: 3) {
-                        Image(systemName: moon.icon)
-                            .foregroundStyle(.indigo)
-                        Text(moon.name)
-                            .foregroundStyle(.gray)
+                if airQuality.aqi != nil || !isDay {
+                    HStack(spacing: 8) {
+                        if let aqi = airQuality.aqi {
+                            let info = AQICategory.info(for: aqi)
+                            HStack(spacing: 3) {
+                                Circle()
+                                    .fill(info.color)
+                                    .frame(width: 7, height: 7)
+                                Text("AQI \(aqi)")
+                                    .foregroundStyle(.gray)
+                                if airQuality.isOffline {
+                                    Image(systemName: "wifi.slash")
+                                        .font(.caption2)
+                                        .foregroundStyle(.orange)
+                                }
+                            }
+                            .font(.caption2)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.85)
+                        }
+
+                        if !isDay {
+                            let moon = MoonPhaseCalculator.phase(for: now)
+                            HStack(spacing: 3) {
+                                Image(systemName: moon.icon)
+                                    .foregroundStyle(.indigo)
+                                Text(moon.name)
+                                    .foregroundStyle(.gray)
+                            }
+                            .font(.caption2)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.85)
+                        }
                     }
-                    .font(.caption2)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.85)
                 }
             }
 
@@ -1193,6 +1353,9 @@ struct TimeZoneCard: View {
         }
         .task(id: "\(city.id)-\(settings.useFahrenheit)-\(settings.use24Hour)") {
             await weather.load(cityID: city.id, latitude: city.latitude, longitude: city.longitude, units: settings.temperatureUnit, use24Hour: settings.use24Hour)
+        }
+        .task(id: "\(city.id)-aqi") {
+            await airQuality.load(cityID: city.id, latitude: city.latitude, longitude: city.longitude)
         }
         .sheet(isPresented: $showingDetail) {
             CityDetailView(
