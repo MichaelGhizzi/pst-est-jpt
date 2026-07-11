@@ -11,6 +11,29 @@ enum TemperatureUnit: String {
     var suffix: String { self == .fahrenheit ? "F" : "C" }
 }
 
+enum AppearanceMode: String, CaseIterable, Identifiable {
+    case system, light, dark
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .system: return "System"
+        case .light: return "Light"
+        case .dark: return "Dark"
+        }
+    }
+
+    /// nil tells SwiftUI to follow the system setting.
+    var colorScheme: ColorScheme? {
+        switch self {
+        case .system: return nil
+        case .light: return .light
+        case .dark: return .dark
+        }
+    }
+}
+
 @MainActor
 class AppSettings: ObservableObject {
     @Published var useFahrenheit: Bool {
@@ -19,25 +42,50 @@ class AppSettings: ObservableObject {
     @Published var use24Hour: Bool {
         didSet { UserDefaults.standard.set(use24Hour, forKey: Keys.use24Hour) }
     }
+    @Published var appearanceMode: AppearanceMode {
+        didSet { UserDefaults.standard.set(appearanceMode.rawValue, forKey: Keys.appearanceMode) }
+    }
+    /// nil means "use the default blue tint".
+    @Published var backgroundTintHex: String? {
+        didSet { UserDefaults.standard.set(backgroundTintHex, forKey: Keys.backgroundTintHex) }
+    }
 
     private enum Keys {
         static let useFahrenheit = "settings.useFahrenheit"
         static let use24Hour = "settings.use24Hour"
+        static let appearanceMode = "settings.appearanceMode"
+        static let backgroundTintHex = "settings.backgroundTintHex"
     }
 
     init() {
         let defaults = UserDefaults.standard
         self.useFahrenheit = defaults.object(forKey: Keys.useFahrenheit) as? Bool ?? true
         self.use24Hour = defaults.object(forKey: Keys.use24Hour) as? Bool ?? false
+        let storedMode = defaults.string(forKey: Keys.appearanceMode) ?? AppearanceMode.system.rawValue
+        self.appearanceMode = AppearanceMode(rawValue: storedMode) ?? .system
+        self.backgroundTintHex = defaults.string(forKey: Keys.backgroundTintHex)
     }
 
     var temperatureUnit: TemperatureUnit { useFahrenheit ? .fahrenheit : .celsius }
     var clockFormat: String { use24Hour ? "HH:mm" : "h:mm a" }
+
+    /// The app-wide background gradient tint. Defaults to blue if the user
+    /// hasn't picked a custom one.
+    var backgroundTint: Color {
+        backgroundTintHex.map { Color(hex: $0) } ?? .blue
+    }
 }
 
 struct SettingsView: View {
     @EnvironmentObject var settings: AppSettings
     @Environment(\.dismiss) private var dismiss
+
+    private var backgroundColorBinding: Binding<Color> {
+        Binding(
+            get: { settings.backgroundTint },
+            set: { settings.backgroundTintHex = $0.hexString }
+        )
+    }
 
     var body: some View {
         NavigationStack {
@@ -47,6 +95,24 @@ struct SettingsView: View {
                 }
                 Section("Time") {
                     Toggle("Use 24-Hour Time", isOn: $settings.use24Hour)
+                }
+                Section("Appearance") {
+                    Picker("Appearance", selection: $settings.appearanceMode) {
+                        ForEach(AppearanceMode.allCases) { mode in
+                            Text(mode.label).tag(mode)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                }
+                Section {
+                    ColorPicker("Background Color", selection: backgroundColorBinding, supportsOpacity: false)
+                    Button("Use Default (Blue)", role: .destructive) {
+                        settings.backgroundTintHex = nil
+                    }
+                } header: {
+                    Text("Background Tint")
+                } footer: {
+                    Text("Colors the subtle gradient behind your city list.")
                 }
             }
             .navigationTitle("Settings")
@@ -464,7 +530,12 @@ class CityEventsManager: ObservableObject {
     @Published var isLoading = false
     @Published var errorMessage: String?
 
-    private let ticketmasterKey = "VZGLABmlOrPw2s8RwDH4U6d0FA79LsfE"
+    /// Pulled from Info.plist at runtime, which in turn is populated from the
+    /// TICKETMASTER_API_KEY build setting (see Secrets.xcconfig). Never commit
+    /// the real key to source control — only the xcconfig template belongs in git.
+    private var ticketmasterKey: String {
+        Bundle.main.object(forInfoDictionaryKey: "TicketmasterAPIKey") as? String ?? ""
+    }
 
     private static let ticketmasterCountries: Set<String> = [
         "US", "CA", "IE", "GB", "AU", "NZ", "MX",
@@ -1309,7 +1380,7 @@ struct ContentView: View {
             .scrollContentBackground(.hidden)
             .background(
                 LinearGradient(
-                    colors: [Color.blue.opacity(0.08), Color.white.opacity(0.10)],
+                    colors: [settings.backgroundTint.opacity(0.14), Color(uiColor: .systemBackground)],
                     startPoint: .top,
                     endPoint: .bottom
                 )
@@ -1345,6 +1416,7 @@ struct ContentView: View {
             }
         }
         .environmentObject(settings)
+        .preferredColorScheme(settings.appearanceMode.colorScheme)
         .onReceive(timer) { now = $0 }
     }
 }
