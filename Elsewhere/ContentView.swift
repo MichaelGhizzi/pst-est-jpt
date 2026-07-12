@@ -174,36 +174,6 @@ enum AQICategory {
     }
 }
 
-// MARK: - Moon phase (local calculation, no network call)
-
-enum MoonPhaseCalculator {
-    struct Phase {
-        let name: String
-        let icon: String
-    }
-
-    /// Reference new moon: Jan 6, 2000 18:14 UTC. Synodic month ~29.53059 days.
-    /// This is an approximation (accurate to roughly +/- a few hours), which is
-    /// plenty for a glanceable "what's the moon doing tonight" indicator.
-    static func phase(for date: Date) -> Phase {
-        let knownNewMoon = Date(timeIntervalSince1970: 947_182_440)
-        let synodicMonth = 29.53058867
-        let daysSince = date.timeIntervalSince(knownNewMoon) / 86400
-        var age = daysSince.truncatingRemainder(dividingBy: synodicMonth)
-        if age < 0 { age += synodicMonth }
-
-        let names = ["New Moon", "Waxing Crescent", "First Quarter", "Waxing Gibbous",
-                     "Full Moon", "Waning Gibbous", "Last Quarter", "Waning Crescent"]
-        let icons = ["moonphase.new.moon", "moonphase.waxing.crescent", "moonphase.first.quarter",
-                     "moonphase.waxing.gibbous", "moonphase.full.moon", "moonphase.waning.gibbous",
-                     "moonphase.last.quarter", "moonphase.waning.crescent"]
-
-        let slice = synodicMonth / 8
-        let index = Int((age / slice).rounded()) % 8
-        return Phase(name: names[index], icon: icons[index])
-    }
-}
-
 // MARK: - Shared disk cache (used by Weather/Forecast/AirQuality managers so
 // each one doesn't hand-roll its own encode/save/decode/load boilerplate)
 
@@ -217,6 +187,18 @@ enum PersistentCache {
         guard let data = UserDefaults.standard.data(forKey: key) else { return nil }
         return try? JSONDecoder().decode(T.self, from: data)
     }
+
+    /// Loads a cached value only if it's newer than `maxAge` seconds.
+    /// Callers pass a key path to whichever `Date` field on `T` records when
+    /// it was cached (e.g. `\.cachedAt`). Anything older is treated as if no
+    /// cache existed at all, so callers fall through to their "unavailable"
+    /// state instead of silently showing very old data.
+    static func load<T: Codable>(_ type: T.Type, forKey key: String, maxAge: TimeInterval, cachedAt: (T) -> Date) -> T? {
+        guard let value = load(type, forKey: key) else { return nil }
+        let age = Date().timeIntervalSince(cachedAt(value))
+        guard age >= 0, age <= maxAge else { return nil }
+        return value
+    }
 }
 
 // MARK: - Weather (current conditions)
@@ -229,6 +211,7 @@ struct WeatherResponse: Codable {
 struct CurrentWeather: Codable {
     let temperature_2m: Double
     let weather_code: Int
+    let relative_humidity_2m: Int?
 }
 
 struct SunTimes: Codable {
@@ -242,6 +225,7 @@ private struct CachedWeather: Codable {
     var icon: String
     var sunrise: String
     var sunset: String
+    var humidity: String
     var cachedAt: Date
 }
 
@@ -252,12 +236,17 @@ class WeatherManager: ObservableObject {
     @Published var icon = "cloud.fill"
     @Published var sunrise = "--:--"
     @Published var sunset = "--:--"
+    @Published var humidity = "--%"
     @Published var isOffline = false
+
+    /// Current conditions go stale fast — beyond this, showing the old
+    /// number would be actively misleading rather than just "a bit old".
+    private static let cacheMaxAge: TimeInterval = 60 * 60 * 6
 
     private func cacheKey(_ cityID: UUID) -> String { "weather.cache.\(cityID.uuidString)" }
 
     func load(cityID: UUID, latitude: Double, longitude: Double, units: TemperatureUnit, use24Hour: Bool) async {
-        guard let url = URL(string: "https://api.open-meteo.com/v1/forecast?latitude=\(latitude)&longitude=\(longitude)&current=temperature_2m,weather_code&daily=sunrise,sunset&temperature_unit=\(units.apiParam)&timezone=auto") else { return }
+        guard let url = URL(string: "https://api.open-meteo.com/v1/forecast?latitude=\(latitude)&longitude=\(longitude)&current=temperature_2m,weather_code,relative_humidity_2m&daily=sunrise,sunset&temperature_unit=\(units.apiParam)&timezone=auto") else { return }
 
         do {
             let (data, _) = try await URLSession.shared.data(from: url)
@@ -267,6 +256,10 @@ class WeatherManager: ObservableObject {
             let mapped = WeatherCodeMapper.iconAndCondition(for: weather.current.weather_code)
             condition = mapped.condition
             icon = mapped.icon
+
+            if let relativeHumidity = weather.current.relative_humidity_2m {
+                humidity = "\(relativeHumidity)%"
+            }
 
             if let firstSunrise = weather.daily?.sunrise.first {
                 sunrise = Self.formatSunTime(firstSunrise, use24Hour: use24Hour)
@@ -284,6 +277,7 @@ class WeatherManager: ObservableObject {
                 icon = cached.icon
                 sunrise = cached.sunrise
                 sunset = cached.sunset
+                humidity = cached.humidity
                 isOffline = true
             } else {
                 temperature = "--°"
@@ -291,6 +285,7 @@ class WeatherManager: ObservableObject {
                 icon = "exclamationmark.triangle"
                 sunrise = "--:--"
                 sunset = "--:--"
+                humidity = "--%"
                 isOffline = false
             }
         }
@@ -315,12 +310,12 @@ class WeatherManager: ObservableObject {
 
     private func saveCache(cityID: UUID) {
         let cached = CachedWeather(temperature: temperature, condition: condition, icon: icon,
-                                    sunrise: sunrise, sunset: sunset, cachedAt: Date())
+                                    sunrise: sunrise, sunset: sunset, humidity: humidity, cachedAt: Date())
         PersistentCache.save(cached, forKey: cacheKey(cityID))
     }
 
     private func loadCache(cityID: UUID) -> CachedWeather? {
-        PersistentCache.load(CachedWeather.self, forKey: cacheKey(cityID))
+        PersistentCache.load(CachedWeather.self, forKey: cacheKey(cityID), maxAge: Self.cacheMaxAge, cachedAt: \.cachedAt)
     }
 }
 
@@ -369,13 +364,15 @@ class AirQualityManager: ObservableObject {
         }
     }
 
+    private static let cacheMaxAge: TimeInterval = 60 * 60 * 6
+
     private func saveCache(cityID: UUID, value: Int) {
         let cached = CachedAirQuality(aqi: value, cachedAt: Date())
         PersistentCache.save(cached, forKey: cacheKey(cityID))
     }
 
     private func loadCache(cityID: UUID) -> CachedAirQuality? {
-        PersistentCache.load(CachedAirQuality.self, forKey: cacheKey(cityID))
+        PersistentCache.load(CachedAirQuality.self, forKey: cacheKey(cityID), maxAge: Self.cacheMaxAge, cachedAt: \.cachedAt)
     }
 }
 
@@ -485,19 +482,21 @@ class ForecastManager: ObservableObject {
         }
     }
 
+    private static let cacheMaxAge: TimeInterval = 60 * 60 * 24
+
     private func saveCache(cityID: UUID) {
         let cached = CachedForecast(days: days, cachedAt: Date())
         PersistentCache.save(cached, forKey: cacheKey(cityID))
     }
 
     private func loadCache(cityID: UUID) -> CachedForecast? {
-        PersistentCache.load(CachedForecast.self, forKey: cacheKey(cityID))
+        PersistentCache.load(CachedForecast.self, forKey: cacheKey(cityID), maxAge: Self.cacheMaxAge, cachedAt: \.cachedAt)
     }
 }
 
 // MARK: - City Events
 
-struct CityEvent: Identifiable {
+struct CityEvent: Identifiable, Codable {
     let id: String
     let title: String
     let category: String
@@ -524,11 +523,17 @@ enum EventsError: LocalizedError {
     }
 }
 
+private struct CachedEvents: Codable {
+    var events: [CityEvent]
+    var cachedAt: Date
+}
+
 @MainActor
 class CityEventsManager: ObservableObject {
     @Published var events: [CityEvent] = []
     @Published var isLoading = false
     @Published var errorMessage: String?
+    @Published var isOffline = false
 
     /// Pulled from Info.plist at runtime, which in turn is populated from the
     /// TICKETMASTER_API_KEY build setting (see Secrets.xcconfig). Never commit
@@ -542,30 +547,71 @@ class CityEventsManager: ObservableObject {
         "AT", "BE", "DE", "DK", "ES", "FI", "NL", "NO", "PL", "SE", "FR"
     ]
 
+    /// Event listings drift more slowly than weather, but a day-old "what's
+    /// happening tonight" list is still useful, so this is generous.
+    private static let cacheMaxAge: TimeInterval = 60 * 60 * 24
+
     func load(city: String, countryCode: String) async {
         isLoading = true
         errorMessage = nil
+        isOffline = false
         defer { isLoading = false }
 
-        do {
-            if countryCode == "JP" {
-                events = loadJapanOfficialLinks(city: city)
-            } else if Self.ticketmasterCountries.contains(countryCode) {
-                events = try await loadFromTicketmaster(city: normalizedCityForTicketmaster(city), countryCode: countryCode)
-            } else {
-                throw EventsError.unsupportedCountry(countryCode)
-            }
-
+        // Japan's list is built from static official links (no network call),
+        // so there's nothing to cache or fall back on for that branch.
+        guard countryCode != "JP" else {
+            events = loadJapanOfficialLinks(city: city)
             if events.isEmpty {
                 errorMessage = "No events found for \(city) right now."
             }
-        } catch let error as EventsError {
-            errorMessage = error.localizedDescription
-            events = []
-        } catch {
-            errorMessage = "Couldn't load events: \(error.localizedDescription)"
-            events = []
+            return
         }
+
+        guard Self.ticketmasterCountries.contains(countryCode) else {
+            errorMessage = EventsError.unsupportedCountry(countryCode).localizedDescription
+            events = []
+            return
+        }
+
+        do {
+            let fetched = try await loadFromTicketmaster(city: normalizedCityForTicketmaster(city), countryCode: countryCode)
+            events = fetched
+            if events.isEmpty {
+                errorMessage = "No events found for \(city) right now."
+            } else {
+                saveCache(city: city, countryCode: countryCode)
+            }
+        } catch {
+            if let cached = loadCache(city: city, countryCode: countryCode) {
+                events = cached
+                isOffline = true
+                errorMessage = "Showing saved events — couldn't refresh right now."
+            } else if let eventsError = error as? EventsError {
+                errorMessage = eventsError.localizedDescription
+                events = []
+            } else {
+                errorMessage = "Couldn't load events: \(error.localizedDescription)"
+                events = []
+            }
+        }
+    }
+
+    private func cacheKey(city: String, countryCode: String) -> String {
+        "events.cache.\(countryCode).\(city.lowercased())"
+    }
+
+    private func saveCache(city: String, countryCode: String) {
+        let cached = CachedEvents(events: events, cachedAt: Date())
+        PersistentCache.save(cached, forKey: cacheKey(city: city, countryCode: countryCode))
+    }
+
+    private func loadCache(city: String, countryCode: String) -> [CityEvent]? {
+        PersistentCache.load(
+            CachedEvents.self,
+            forKey: cacheKey(city: city, countryCode: countryCode),
+            maxAge: Self.cacheMaxAge,
+            cachedAt: \.cachedAt
+        )?.events
     }
 
     private func normalizedCityForTicketmaster(_ city: String) -> String {
@@ -782,47 +828,6 @@ struct ForecastStripView: View {
     }
 }
 
-// MARK: - Air Quality Row (used in the detail sheet)
-
-struct AirQualityRow: View {
-    @ObservedObject var airQuality: AirQualityManager
-
-    var body: some View {
-        Group {
-            if let aqi = airQuality.aqi {
-                let info = AQICategory.info(for: aqi)
-                VStack(alignment: .leading, spacing: 6) {
-                    HStack(spacing: 10) {
-                        Circle()
-                            .fill(info.color)
-                            .frame(width: 14, height: 14)
-
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("AQI \(aqi)")
-                                .font(.headline)
-                            Text(info.label)
-                                .font(.subheadline)
-                                .foregroundStyle(.secondary)
-                        }
-
-                        Spacer()
-                    }
-
-                    if airQuality.isOffline {
-                        Label("Showing saved reading", systemImage: "wifi.slash")
-                            .font(.caption2)
-                            .foregroundStyle(.orange)
-                    }
-                }
-            } else {
-                Text("Air quality unavailable.")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-            }
-        }
-    }
-}
-
 // MARK: - Shared small caption-style badge, used for sunrise/sunset/AQI/moon
 // rows on the card so each one isn't hand-styled separately.
 
@@ -931,10 +936,6 @@ struct CityDetailView: View {
                         .listRowInsets(EdgeInsets(top: 6, leading: 12, bottom: 6, trailing: 12))
                 }
 
-                Section("Air Quality") {
-                    AirQualityRow(airQuality: airQuality)
-                }
-
                 Section("What's Happening in \(city)") {
                     if events.isLoading {
                         HStack {
@@ -946,6 +947,11 @@ struct CityDetailView: View {
                         Text(events.errorMessage ?? "Nothing found.")
                             .foregroundStyle(.secondary)
                     } else {
+                        if events.isOffline, let message = events.errorMessage {
+                            Label(message, systemImage: "wifi.slash")
+                                .font(.caption)
+                                .foregroundStyle(.orange)
+                        }
                         ForEach(events.events) { event in
                             EventRow(event: event)
                         }
@@ -1490,24 +1496,19 @@ struct TimeZoneCard: View {
                     }
                 }
 
-                if airQuality.aqi != nil || !isDay {
-                    HStack(spacing: 8) {
-                        if let aqi = airQuality.aqi {
-                            let info = AQICategory.info(for: aqi)
-                            CardBadge(text: "AQI \(aqi)", showOffline: airQuality.isOffline) {
-                                Circle()
-                                    .fill(info.color)
-                                    .frame(width: 7, height: 7)
-                            }
+                HStack(spacing: 8) {
+                    if let aqi = airQuality.aqi {
+                        let info = AQICategory.info(for: aqi)
+                        CardBadge(text: "AQI \(aqi)", showOffline: airQuality.isOffline) {
+                            Circle()
+                                .fill(info.color)
+                                .frame(width: 7, height: 7)
                         }
+                    }
 
-                        if !isDay {
-                            let moon = MoonPhaseCalculator.phase(for: now)
-                            CardBadge(text: moon.name) {
-                                Image(systemName: moon.icon)
-                                    .foregroundStyle(.indigo)
-                            }
-                        }
+                    CardBadge(text: weather.humidity) {
+                        Image(systemName: "humidity.fill")
+                            .foregroundStyle(.cyan)
                     }
                 }
             }
