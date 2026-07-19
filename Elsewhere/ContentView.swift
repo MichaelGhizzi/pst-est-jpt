@@ -574,7 +574,7 @@ class CityEventsManager: ObservableObject {
         }
 
         do {
-            let fetched = try await loadFromTicketmaster(city: normalizedCityForTicketmaster(city), countryCode: countryCode)
+            let fetched = try await loadFromTicketmaster(city: city, countryCode: countryCode)
             events = fetched
             if events.isEmpty {
                 errorMessage = "No events found for \(city) right now."
@@ -612,15 +612,6 @@ class CityEventsManager: ObservableObject {
             maxAge: Self.cacheMaxAge,
             cachedAt: \.cachedAt
         )?.events
-    }
-
-    private func normalizedCityForTicketmaster(_ city: String) -> String {
-        switch city.lowercased() {
-        case "orange county":
-            return "Anaheim"
-        default:
-            return city
-        }
     }
 
     // MARK: Ticketmaster

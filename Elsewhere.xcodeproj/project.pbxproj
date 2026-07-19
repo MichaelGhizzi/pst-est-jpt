@@ -8,6 +8,7 @@
 
 /* Begin PBXFileReference section */
 		12C683E32FF60AFF0047FC9E /* Elsewhere.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Elsewhere.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		12FD82BF300D5749009D031C /* pst-est-jst-ios-Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = "pst-est-jst-ios-Info.plist"; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -32,6 +33,7 @@
 		12C683DA2FF60AFF0047FC9E = {
 			isa = PBXGroup;
 			children = (
+				12FD82BF300D5749009D031C /* pst-est-jst-ios-Info.plist */,
 				12C683E52FF60AFF0047FC9E /* Elsewhere */,
 				12C683E42FF60AFF0047FC9E /* Products */,
 			);
@@ -127,6 +129,8 @@
 /* Begin XCBuildConfiguration section */
 		12C683EC2FF60B000047FC9E /* Debug */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReferenceAnchor = 12C683E52FF60AFF0047FC9E /* Elsewhere */;
+			baseConfigurationReferenceRelativePath = Secrets.xcconfig;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
 				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
@@ -190,6 +194,8 @@
 		};
 		12C683ED2FF60B000047FC9E /* Release */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReferenceAnchor = 12C683E52FF60AFF0047FC9E /* Elsewhere */;
+			baseConfigurationReferenceRelativePath = Secrets.xcconfig;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
 				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
@@ -246,6 +252,8 @@
 		};
 		12C683EF2FF60B000047FC9E /* Debug */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReferenceAnchor = 12C683E52FF60AFF0047FC9E /* Elsewhere */;
+			baseConfigurationReferenceRelativePath = Secrets.xcconfig;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
@@ -254,6 +262,7 @@
 				DEVELOPMENT_TEAM = S8F9TBSB47;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "pst-est-jst-ios-Info.plist";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -278,6 +287,8 @@
 		};
 		12C683F02FF60B000047FC9E /* Release */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReferenceAnchor = 12C683E52FF60AFF0047FC9E /* Elsewhere */;
+			baseConfigurationReferenceRelativePath = Secrets.xcconfig;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
@@ -286,6 +297,7 @@
 				DEVELOPMENT_TEAM = S8F9TBSB47;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "pst-est-jst-ios-Info.plist";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
